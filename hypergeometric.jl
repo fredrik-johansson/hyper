@@ -1156,6 +1156,147 @@ end
 
 
 #### evaluation of series solutions to diff equations ##########################
+#=
+The setup follows Mezzarobba 2019 Truncation Bounds
+
+With θ on the left we have a differential operator
+
+  P(x,θ) = θ^r*Px_r + ... + θ*Px_1 + Px_0,  Px_i in F[x]
+         = Pθ_s*x^s + ... + Pθ_1*x + Pθ_0,  Pθ_i in F[θ]
+
+The radius of convergence of the solutions about 0 are related to the zeros of
+Px[r]: we assume that Px_r does not have a zero at x = 0. In this case series
+solution to P(z,θ)u(z) = 0 can be written down as
+
+  u(z) = sum_{0≤i<∞, 0≤j≤K} u_{i,j} z^(λ+i)*log^j(z)/j!
+
+for some K, and which u_{i,j} are free and which u_{i,j} determined by pervious
+terms in the solution is explained in Corollary 5.4: Only the u_{i,j} for
+which j is strictly less than the multiplicy of λ+i as a root of Pθ_0 are free.
+Considering all λ such that λ is a root of Pθ_0 and none of λ-1, λ-2, ... are
+roots of Pθ[0] gives a total of deg(Pθ_0) linearly independent solutions.
+
+Now consider a truncation
+
+  u_N(z) = sum_{0≤i<N, 0≤j≤K} u_{i,j} z^(λ+i)*log^j(z)/j!
+
+and the normalized difference y(z) = Px_r(z)*(u_N(z) - u(z)).
+This y(z) satisfies L(z,θ)y(z) = Q_0(θ)q(z) where
+
+  1. L(x,θ) := P(z,θ)/Px_r(z) = Q_0(θ) + Q_1(θ)*z + Q_2(θ)*z^2 + ...
+  2. Q_0(θ) is monic in θ with degree r (and is proportional to Pθ_0)
+  3. The Q_1, Q_2, ... all have degree < r
+  4. Assuming none of λ+N, ..., λ+N+s-1 are roots of Q_0(θ), the normalized
+     residue q(z) is of the form
+
+        q(z) = sum_{0≤i<s, 0≤j≤K} q_{i,j} z^(λ+N+i)*log^j(z)/j!
+
+Let ahat(z) be a series satisfying Proposition 5.5. Compute this by noting
+
+    sum_{1≤j} Q_j(θ)*x^j = P(x,θ)/Px_r(x) - Q_0(θ)
+                         = P(x,θ)/Px_r(x) - P(0,θ)/Px_r(0)
+
+If we can expand the rhs as a finite linear combination
+
+    sum_i f_i(θ)*(some power series in RR_+[[x]])
+
+then it suffices to bound each of the f_j(θ)/Q_0(θ) in accordance with the lhs
+of 5.9. Since we are ultimately interested in hhat(z) = exp(int_0^z ahat(z)/z dz),
+it makes since to expand
+
+    sum_{1≤j} Q_j(θ)*x^j = sum_i f_i(θ) x*d/dx(some power series in x*RR_+[[x]])
+
+For all the differential equations considered here, since we have few
+singularities, the "some power series in x*RR_+[x]" can be taken to be
+
+  log(1/(1-x)),  log(1/(1-x^2)),  log((1+x)/(1-x)),
+  x/(1-x)^i,     x^1/(1-x^2)^i,   x^2/(1-x^2)^i        1≤i≤~s
+
+and our hhat(z) will take the shape (1-z)^?*(1+z)^?*exp(rational function of z).
+
+At this point, with some minor technicalities, Algorithm 6.11 computes a ghat
+such that
+
+(*)   z^-λ*(u_N(z) - u(z)) << phat(z)*z^N*ghat(z)*hhat(z)
+
+where phat(z) is a majorant of 1/Px_r(z). Note that we have taken out the z^N
+from the ghat(z). Since the lhs is a polynomial in log(z), this must be
+interpreted as saying that the rhs majorizes each of the coefficients of log(z).
+
+Given (*) how to compute bounds on |u_N(z) - u(z)| and the derivatives
+|u_N'(z) - u'(z)|, |u_N''(z) - u''(z)|, ... |u_N^(δ-1)(z) - u^(δ-1)(z)| ???
+
+The code currently computes the power series to order O(ε^δ) of
+
+  phat(|z|+ε)*(|z|+ε)^(λ+N)*ghat(|z|+ε)*hhat(|z|+ε)
+
+and does an add_error! on the coefficients of ε^d/d!, but this looks suspicious.
+=#
+
+#=
+Example.
+
+Consider computing 2F1(a,b,c,z) following the "compute_f_anywhere" path.
+
+The equation satisfied by u(x) = (1+x)^(-2*a)*2F1(a,b,c,4*x/(1+x)^2) is
+
+  julia> R,(a,b,c)=PolynomialRing(ZZ,["a","b","c"])
+
+  julia> F=FractionField(R)
+
+  julia> (a,b,c)=map(F,(a,b,c))
+
+  julia> Fx, x = PolynomialRing(F, "x")
+
+  julia> hyp_equ([a,b], [c], -2*Fx(a)//(1+x), 4*x//(1+x)^2)
+
+  (AbstractAlgebra.Generic.Poly{AbstractAlgebra.Generic.Frac{fmpz_mpoly}}[
+    θ^2 + (c - 1)*θ,
+    (-4*b + 2*c)*θ - 4*a*b + 2*a*c + 4*b - 2*c,
+    -θ^2 + (-4*a + c + 3)*θ - 4*a^2 + 2*a*c + 6*a - 2*c - 2],
+
+  AbstractAlgebra.Generic.Poly{AbstractAlgebra.Generic.Frac{fmpz_mpoly}}[
+    (-4*a^2 + 2*a*c + 6*a - 2*c - 2)*x^2 + (-4*a*b + 2*a*c + 4*b - 2*c)*x,
+    (-4*a + c + 3)*x^2 + (-4*b + 2*c)*x + (c - 1),
+    -x^2 + 1])
+
+which indicates
+
+P(x, θ) = -(θ+2*a-2)*(θ+2*a-c-1)*x^2 - 2*(2*b-c)*(θ+a-1)*x + θ*(θ+c-1)
+        = θ^2*(1-x)*(1+x) + ...
+
+
+Now the partial fraction decomposition after integration is
+
+  julia> Fθ,θ=PolynomialRing(F,"θ")
+
+  julia> Fθz,z=PolynomialRing(Fθ,"z")
+
+  julia> partial_fractions(divexact(-(θ+2*a-2)*(θ+2*a-c-1)*z^2 -
+             2*(2*b-c)*(θ+a-1)*z + θ*(θ+c-1) - θ*(θ+c-1)*(1-z)*(1+z), z), 1, 1)
+
+  ((-2*a + c + 1)*θ - 2*a^2 + a*c + 3*a - c - 1)*log(1/(1 - z^2)) +
+     ((-2*b + c)*θ - 2*a*b + a*c + 2*b - c)*log((1 + z)/(1 - z))
+
+
+Since Q_0(θ) = θ*(θ+c-1), For large N, our hhat(z) is going to be about
+
+ hhat(z) = (1/(1-z^2))^|-2*a+c+1| * ((1+z)/(1-z))^|-2*b+c|,
+
+and phat(z) is 1/(1-z^2).
+
+
+From P(x, θ), the coefficients of u(z) = sum_n u_n*z^n satisfy
+
+  (n+1)*(n+c)*u_{n+1} = 2*(2*b-c)*(n+a)*u_n + (n+2*a-1)*(n+2*a-c)*u_{n-1}.
+
+A tight asymptotic bound on the solutions to this is
+
+    u_n = O(n^(|2*b-c|+2*a-c-1))
+
+so how far is the general method from asymptotically optimal?
+
+=#
 
 # for all differential equations here the int_0^z ahat(z)/z dz series can
 # expressed as a finite linear combination of the following functions
@@ -1602,7 +1743,7 @@ function q_residual(Pθ, Px, u, λ::T, N::Int, τ::Int, ν::Int) where T
     for jp in 1:s-j, kp in 0:τ-1-k
       v[1+j,1+k,l] += b[1+j+jp,1+j,1+kp]*u[jp][1+k+kp][l]
     end
-	  q[1+j,1+k,l] = c*v[1+j,1+k,l]
+    q[1+j,1+k,l] = c*v[1+j,1+k,l]
     for kp in 1:τ-1-k
       q[1+j,1+k,l] -= b[1+0,1+j,1+kp]*q[1+j,1+k+kp,l]
     end
@@ -1822,7 +1963,7 @@ println("eval_basis")
       div!(f, mullow(f, logzeval, δ, p), narb(j, p), p)
       add!(f, f, 1, p)
     end
-    finalerror[l] = mullow(finalerror[l], f, s, p)
+    finalerror[l] = mullow(finalerror[l], f, δ, p)
   end
 
   # evaluate the polynomials in log(z)
