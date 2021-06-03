@@ -1228,7 +1228,7 @@ Given (*) how to compute bounds on |u_N(z) - u(z)| and the derivatives
 
 The code currently computes the power series to order O(ε^δ) of
 
-  phat(|z|+ε)*(|z|+ε)^(λ+N)*ghat(|z|+ε)*hhat(|z|+ε)
+  phat(|z|+ε)*(|z|+ε)^(λ+N)*ghat(|z|+ε)*hhat(|z|+ε)*(sum_{j<?} log^j(|z|+ε)/j!
 
 and does an add_error! on the coefficients of ε^d/d!, but this looks suspicious.
 =#
@@ -2068,7 +2068,7 @@ function cscpi_series(x::fmpz, ord::Int, p::Int)
           (Ref{narb}, Int),
           t, p)
     pow!(t, t, 2*n, p)
-    mul!(t, t, bernoulli(2*n)/factorial(ZZ(2*N))*
+    mul!(t, t, bernoulli(2*n)//factorial(ZZ(2*n))*
                (-1)^(n+1)*(4^n-2)*x^(2*n-1), p) # TODO
     setcoeff!(z, 2*n, nacb(t))
   end
