@@ -1290,11 +1290,16 @@ From P(x, θ), the coefficients of u(z) = sum_n u_n*z^n satisfy
 
   (n+1)*(n+c)*u_{n+1} = 2*(2*b-c)*(n+a)*u_n + (n+2*a-1)*(n+2*a-c)*u_{n-1}.
 
-A tight asymptotic bound on the solutions to this is
+For real a,b,c, a tight asymptotic bound on any solution to this is
 
-    u_n = O(n^(|2*b-c|+2*a-c-1))
+    u_n = O(n^(|2*b-c|+2*a-c-1)),
 
-so how far is the general method from asymptotically optimal?
+and the majorant method via phat(z)*hhat(z) gives
+
+    u_n = O(n^(|2*b-c|+|2*a-c-1|)).
+
+Thus the majorant method has overestimated n^(2*a-c-1) by n^|2*a-c-1|, which
+can be a serious overestimation.
 
 =#
 
@@ -1465,18 +1470,15 @@ function partial_fractions(f, k1::Int, k2::Int)
   S = elem_type(Fθ)
   z = gen(Fθz)
 
-  log_coeff = zero(Fθ)
-  log2_coeff0 = zero(Fθ)
-  log2_coeff1 = zero(Fθ)
-  poly_coeffs = S[]
-  recp_coeffs = S[]
-  recp2_coeffs1 = S[]
-  recp2_coeffs2 = S[]
+  r = hyp_majorant{S}(zero(Fθ), zero(Fθ), zero(Fθ), S[], S[], S[], S[])
 
-  if degree(f) >= k1 + k2
-    q, f = divrem(f, (1-z)^k1*(1+z)^k2)
-    for i in 0:degree(q)
-      add_term!(poly_coeffs, i+1, divexact(coeff(q,i), 1+i), Fθ)
+  if degree(f) >= k1+k2
+    # divrem does not work in F[θ][z] :(
+    den = (1-z)^k1*(1+z)^k2
+    while degree(f) >= k1+k2
+      a = divexact(coeff(f, degree(f)), coeff(den, k1+k2))
+      add_coeff!(r.poly_coeffs, degree(f)-(k1+k2), a, Fθ)
+      f -= a*shift_left(den, degree(f)-(k1+k2))
     end
   end
 
@@ -1485,11 +1487,11 @@ function partial_fractions(f, k1::Int, k2::Int)
       a = F(2)^-k2*evaluate(f, Fθ(1))
       if k1 == 1
         f = divexact(-a*(1+z)^k2+f, 1-z)
-        log_coeff += a
+        r.log_coeff += a
       else
         a = divexact(a, k1-1)
         f = divexact(-a*(1+z)^k2*(1+(k1-2)*z)+f, 1-z)
-        add_coeff!(recp_coeffs, k1-1, a, Fθ)
+        add_coeff!(r.recp_coeffs, k1-1, a, Fθ)
       end
       k1 -= 1
 	  else
@@ -1500,29 +1502,25 @@ function partial_fractions(f, k1::Int, k2::Int)
       b = divexact(e2-e1, k2 == 1 ? 4 : 4*k2-4);
       if k2 == 1
         f = divexact(-2*(a+b*z)+(1-z)^(1-k1)*f, 1-z^2)
-        log2_coeff1 += a
-        log2_coeff0 += b
+        r.log2_coeff1 += a
+        r.log2_coeff0 += b
       else
         f = divexact(a*(-1+(3-2*k2)*z^2)-2*b*(z+(-2+k2)*z^3)+f,1-z^2)
-        add_coeff!(recp2_coeffs1, k2-1, a, Fθ)
-        add_coeff!(recp2_coeffs2, k2-1, b, Fθ)
+        add_coeff!(r.recp2_coeffs1, k2-1, a, Fθ)
+        add_coeff!(r.recp2_coeffs2, k2-1, b, Fθ)
       end
       k1 = k2 = k2 - 1
     end
   end
 
-  return hyp_majorant{S}(log_coeff,
-                           log2_coeff0,
-                           log2_coeff1,
-                           poly_coeffs,
-                           recp_coeffs,
-                           recp2_coeffs1,
-                           recp2_coeffs2)
+  return r
 end
 
-# bound n*f(n)/(g(n)=prod_α(n-α)) for n0 <= n <= n1
+# Algorithm 7.1
+# bound sum_{j<τ} |n*[θ^j]f(n+θ)/g(n+θ)| for n0≤n≤n1
 # it is good if g does not vanish at any integer in [n0, n1]
 # pass n1 < 0 for n1 = ∞ :(
+# should have g(θ) = prod_α (θ-α)
 function fraction_bound_normal(
   f, g,
   αs::Vector{T},
@@ -1543,23 +1541,42 @@ println("fraction_bound_normal called")
 @show τ
 @show (n0, n1)
 
-  # x = interval containing [1/n1, 1/n0]
   pm_one = narb()
   ccall((:arb_zero_pm_one, libarb), Nothing,
         (Ref{narb},),
         pm_one)
+
+  # x = interval containing [1/n1, 1/n0]
   x = nacb(mul(pm_one, 1//n0, p))
 
+  # let a[b] denote coeff(a, b)
+  # Since the case of f[d-1] != 0 is important, break up
+  #
+  # n*f(n+ε)/g(n+ε)
+  #
+  # = (n+ε)*f(n+ε)/g(n+ε) - ε*f(n+ε)/g(n+ε)
+  #
+  #            (n+ε)*f(n+ε) - f[d-1]*g(n+ε) - ε*f(n+ε)
+  # = f[d-1] + ---------------------------------------
+  #                             g(n+ε)
+  #     
+  #            sum_{0≤i<d} (f[i-1] - f[d-i]*g[i] - ε*f[i])*(n+ε)^i
+  # = f[d-1] + ---------------------------------------------------
+  #                            prod_α (n+ε-α)
+  # with x = 1/n
+  #              sum_{0≤i<d} (f[i-1] - f[d-i]*g[i] - ε*f[i])*x^(d-1-i)*(1+x*ε)^i
+  # = f[d-1] + x*---------------------------------------------------------------
+  #                                     prod_α (1-x*α+x*ε)
   num = zero(nacb_poly)
   t = one(nacb)
   t2 = nacb_poly(one(nacb), x)
   c0 = nacb()
   c1 = nacb()
   for i in d-1:-1:0
-    mul!(t, t, x, p)
     mul!(c0, t, (i>0 ? coeff(f,i-1) : 0) - coeff(f,d-1)*coeff(g,i), p)
     mul!(c1, t, -coeff(f, i), p)
     add!(num, nacb_poly(c0, c1), mullow(t2, num, τ, p), p)
+    mul!(t, t, x, p)
   end
 
   den = one(nacb_poly)
@@ -1592,6 +1609,7 @@ println("fraction_bound_normal called")
   for i in 0:τ-1
     add!(res, res, abs(coeff(rat, i), p), p)
   end
+  mul!(c, c, real(x), p)
   mul!(res, res, c, p)
   add!(res, res, abs(nacb(coeff(f,d-1), p), p), p)
 
@@ -1600,7 +1618,8 @@ println("fraction_bound_normal returning ", res)
   return res
 end
 
-function fraction_bound_special(f, g, μ::Int, τ::Int, n0::fmpz, p::Int)
+# bound sum_{j<τ} |n*[θ^j]f(n+θ)/(θ^-μ*g(n+θ))|
+function fraction_bound_special(f, g, μ::Int, τ::Int, n::fmpz, p::Int)
   Fθ = parent(f)
   @assert Fθ == parent(g)
   θ = gen(Fθ)
@@ -1608,14 +1627,14 @@ function fraction_bound_special(f, g, μ::Int, τ::Int, n0::fmpz, p::Int)
   g = evaluate(g, θ+n)
   F = nacb_poly()
   G = nacb_poly()
-  for i in 0:τ-1
-    setcoeff!(F, i, nacb(coeff(f, i), p))
-    setcoeff!(G, i, nacb(coeff(g, μ+i), p))
+  for j in 0:τ-1
+    setcoeff!(F, j, nacb(coeff(f, j), p))
+    setcoeff!(G, j, nacb(coeff(g, μ+j), p))
   end
   rat = div(num, den, τ, p)
   res = zero(narb)
-  for i in 0:τ-1
-    add!(res, res, abs(coeff(rat, i)), p)
+  for j in 0:τ-1
+    add!(res, res, abs(nacb(n*ncoeff(rat, j), p)), p)
   end
   return res  
 end
@@ -1696,14 +1715,14 @@ println("equ_bound called")
   curτ = τ
   for (n, μ) in nμ
     majorant_bound_normal(maj, pf, Q0, αs, curτ, curN, n - 1, p)
-    curτ += 1
+    curτ += μ
     majorant_bound_special(maj, pf, Q0, curτ, μ, curN, n, p)
     curN = fmpz(n + 1)
   end
   majorant_bound_normal(maj, pf, Q0, αs, curτ, curN, fmpz(-1), p)
 @show maj
   # 1/Px[1+r] is majorized by abs(1/c)/((1-x)^max(0,k1-k2)*(1-x^2)^k2)
-  return (abs(nacb(inv(c), p), p), max(0,k1-k2), k2, maj)
+  return (abs(nacb(inv(c), p), p), max(0,k1-k2), k2, maj, curτ)
 end
 
 function majorant_bound_normal(
@@ -1843,12 +1862,12 @@ println("eval_basis")
     end
     for i in 1:τ
       for j in 1:i-1
-        for k in 1:ν
-          un[1+μ+τ-i][k] -= coeff(Pn[1], μ+j)*un[1+μ+τ-i+j][k]
+        for l in 1:ν
+          un[1+μ+τ-i][l] -= coeff(Pn[1], μ+j)*un[1+μ+τ-i+j][l]
         end
       end
-      for k in 1:ν
-        un[1+μ+τ-i][k] //= coeff(Pn[1], μ)
+      for l in 1:ν
+        un[1+μ+τ-i][l] //= coeff(Pn[1], μ)
       end
     end
     # trim zeros off un
@@ -1862,14 +1881,14 @@ println("eval_basis")
 
     # add un*z^N to sum
     changed = false
-    znrow = [[mul(zn, un[1+i][k], p) for k in 1:ν] for i in 0:τ-1]
+    znrow = [[mul(zn, un[1+i][l], p) for l in 1:ν] for i in 0:τ-1]
     for d in 0:δ-1
       if d > 0
         # differentiate un
-        for i in 0:τ-1, k in 1:ν          
-          mul!(znrow[1+i][k], znrow[1+i][k], λ+N-d+1, p)
+        for i in 0:τ-1, l in 1:ν          
+          mul!(znrow[1+i][l], znrow[1+i][l], λ+N-d+1, p)
           if i+1 < τ
-            add!(znrow[1+i][k], znrow[1+i][k], znrow[1+i+1][k], p)
+            add!(znrow[1+i][l], znrow[1+i][l], znrow[1+i+1][l], p)
           end
         end
       end
@@ -1896,7 +1915,8 @@ println("eval_basis")
 
   # c/((1-z)^k1*(1-z^2)^k2) is supposed to majorize 1/Px[1+r], r = deg_θ(P)
   # exp(maj(z)) is the hhat(z)
-  (c, k1, k2, maj) = equ_bound(Pθ, Px, λ, ns, αs, τ, N, p)
+  # finalτ is strict bound on the power of log(z) in the real solution f(z)
+  (c, k1, k2, maj, finalτ) = equ_bound(Pθ, Px, λ, ns, αs, τ, N, p)
 @show c
 @show k1
 @show k2
@@ -1956,14 +1976,15 @@ println("eval_basis")
     f = exp_series(eval_series(maj, zeval, δ, p), δ, p)
     finalerror[l] = mullow(finalerror[l], f, δ, p)
 
-    # sum_{j<τ} log(z)^j/j!   TODO!!! τ is not correct here if ns is not empty
+    # sum_{j<finalτ} log(z)^j/j!
     logzeval = log_series(zeval, δ, p)
     f = one(narb_poly)
-    for j in τ-1:-1:1
+    for j in finalτ-1:-1:1
       div!(f, mullow(f, logzeval, δ, p), narb(j, p), p)
       add!(f, f, 1, p)
     end
     finalerror[l] = mullow(finalerror[l], f, δ, p)
+@show finalerror[l]
   end
 
   # evaluate the polynomials in log(z)
