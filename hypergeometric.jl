@@ -1,5 +1,6 @@
-using Nemo
-import Nemo: libarb, libflint, arf_struct, arb_struct, expressify
+using Nemo, Test
+import Nemo: libarb, libflint, arf_struct, arb_struct, mag_struct
+import Nemo: expressify
 import Nemo: zero!, one!, add!, sub!, mul!, div!, inv!, coeff,
        setcoeff!, mullow, gamma, rgamma, solve, overlaps, sub
 
@@ -210,9 +211,19 @@ end
 
 #### output ####################################################################
 
+
+function set!(z::narb, a::AbstractString, p::Int)
+  s = string(a)
+  err = ccall((:arb_set_str, libarb), Cint,
+              (Ref{narb}, Ptr{UInt8}, Int),
+              z, s, p)
+  err == 0 || error("Invalid real string: $(repr(s))")
+  return z
+end
+
 function native_string(x::narb)
   d = precision(x)
-  d = clamp(d, 10, 200)
+  d = clamp(d, 10, 1000)
   d = trunc(Int, d*0.30103)
   cstr = ccall((:arb_get_str, Nemo.libarb), Ptr{UInt8},
          (Ref{narb}, Int, UInt),
@@ -261,6 +272,22 @@ Nemo.AbstractAlgebra.needs_parentheses(x::Union{narb, nacb, nacb_poly, nacb_mat}
 
 
 #### boring arithmetic #########################################################
+
+function radius(a::narb)
+  GC.@preserve a begin
+    r = ccall((:arb_rad_ptr, libarb), Ptr{mag_struct},
+              (Ref{narb}, ),
+              a)
+    return ccall((:mag_get_d, libarb), Float64,
+                 (Ptr{mag_struct}, ),
+                 r)
+  end
+end
+
+function radius(a::nacb)
+  return max(radius(real(a)), radius(imag(a)))
+end
+
 
 nrows(a::nacb_mat) = a.r
 
@@ -345,7 +372,7 @@ function precision(x::narb)
 end
 
 function precision(z::nacb)
-  return ccall((:arb_rel_accuracy_bits, libarb), Int,
+  return ccall((:acb_rel_accuracy_bits, libarb), Int,
                (Ref{nacb}, ),
                z)
 end
@@ -533,12 +560,24 @@ function mul!(z::narb, x::narb, y::fmpz, p::Int)
   return z
 end
 
+function mul(a::narb, b::fmpz, p::Int)
+  return mul!(narb(), a, b, p)
+end
+
 function mul!(z::nacb, x::nacb, y::fmpz, p::Int)
   ccall((:acb_mul_fmpz, libarb), Nothing,
         (Ref{nacb}, Ref{nacb}, Ref{fmpz}, Int),
         z, x, y, p)
   return z
 end
+
+function mul!(z::nacb, a::nacb, b::narb, p::Int)
+  ccall((:acb_mul_arb, libarb), Nothing,
+        (Ref{nacb}, Ref{nacb}, Ref{narb}, Int),
+        z, a, b, p)
+  return z
+end
+
 
 function mul!(z::narb, x::narb, y::narb, p::Int)
   ccall((:arb_mul, libarb), Nothing,
@@ -579,6 +618,13 @@ function div!(z::narb, x::narb, y::fmpz, p::Int)
   ccall((:arb_div_fmpz, libarb), Nothing,
         (Ref{narb}, Ref{narb}, Ref{fmpz}, Int),
         z, x, y, p)
+  return z
+end
+
+function div!(z::narb, a::narb, b::narb, p::Int)
+  ccall((:arb_div, libarb), Nothing,
+        (Ref{narb}, Ref{narb}, Ref{narb}, Int),
+        z, a, b, p)
   return z
 end
 
@@ -665,6 +711,15 @@ function sub(a::narb, b::narb, p::Int)
   return sub!(narb(), a, b, p)
 end
 
+function sub(a::Int, b::nacb, p::Int)
+  return sub!(nacb(), a, b, p)
+end
+
+function add(a::Int, b::nacb, p::Int)
+  return add!(nacb(), b, a, p)
+end
+
+
 function add!(z::narb_poly, x::narb_poly, y::narb_poly, p::Int)
   ccall((:arb_poly_add, libarb), Nothing,
         (Ref{narb_poly}, Ref{narb_poly}, Ref{narb_poly}, Int),
@@ -737,7 +792,7 @@ end
 
 
 function sub!(z::narb_poly, a::Int, b::narb_poly, p::Int)
-  return neg!(add!(z, b, -a, p)) # TODO
+  return neg!(add!(z, b, Base.checked_neg(a), p)) # TODO
 end
 
 function sub(a::Int, b::narb_poly, p::Int)
@@ -765,12 +820,12 @@ function neg!(z::nacb_poly, a::nacb_poly)
   return z
 end
 
-function neg!(z::Union{narb, nacb, narb_poly, acb_poly})
+function neg!(z::Union{narb, nacb, narb_poly, nacb_poly})
   return neg!(z, z)
 end
 
-function Base.:-(a::T) where T <: Union{narb, nacb, narb_poly, acb_poly}
-  return neg!(T(), a)
+function neg(z::Union{narb, nacb, narb_poly, nacb_poly})
+  return neg!(typeof(z)(), z)
 end
 
 function sub!(z::nacb, x::Int, y::nacb, p::Int)
@@ -840,6 +895,13 @@ function log!(z::nacb, x::nacb, p::Int)
   return z
 end
 
+function pow!(z::narb, x::narb, y::UInt, p::Int)
+  ccall((:arb_pow_ui, libarb), Nothing,
+      (Ref{narb}, Ref{narb}, UInt, Int),
+      z, x, y, p)
+  return z
+end
+
 function pow!(z::nacb, x::nacb, y::Int, p::Int)
   ccall((:acb_pow_si, libarb), Nothing,
       (Ref{nacb}, Ref{nacb}, Int, Int),
@@ -863,20 +925,24 @@ function ldexp!(z::nacb, x::nacb, y::Int)
   return z
 end
 
-function Base.:(+)(x::Int, y::nacb)
-  return add!(nacb(), y, x, precision_inc(y, 60))
+function precision_min(a::Union{narb, nacb}, b::Union{narb, nacb})
+  p = min(precision(a), precision(b))
+  b = 60
+  return clamp(p, 1, ARF_PREC_EXACT - b) + b
 end
 
-function Base.:(+)(y::nacb, x::Int)
-  return add!(nacb(), y, x, precision_inc(y, 60))
+function mul!(z::nacb, a::nacb, b::Int, p::Int)
+  ccall((:acb_mul_si, libarb), Nothing,
+        (Ref{nacb}, Ref{nacb}, Int, Int),
+        z, a, b, p)
+  return z
 end
 
-function Base.:(-)(x::Int, y::nacb)
-  return sub!(nacb(), x, y, precision_inc(y, 60))
-end
-
-function Base.:(-)(x::nacb, y::Int)
-  return sub!(nacb(), x, y, precision_inc(x, 60))
+function pow!(z::nacb, a::nacb, b::Int, p::Int)
+  ccall((:acb_pow_si, libarb), Nothing,
+        (Ref{nacb}, Ref{nacb}, Int, Int),
+        z, a, b, p)
+  return z
 end
 
 function mul(x::narb, y::Union{fmpq, narb}, p::Int)
@@ -939,6 +1005,13 @@ function Base.hcat(a::nacb_mat, b::nacb_mat)
     end
   end
   return z
+end
+
+function overlaps(a::narb, b::narb)
+  r = ccall((:arb_overlaps, libarb), Cint,
+            (Ref{narb}, Ref{narb}),
+            a, b)
+  return r != 0
 end
 
 function overlaps(a::nacb, b::nacb)
@@ -1005,6 +1078,14 @@ function mul(a::narb_poly, b::narb, p::Int)
   return mul!(narb_poly(), a, b, p)
 end
 
+function div!(z::narb_poly, a::narb_poly, b::narb, p::Int)
+  ccall((:arb_poly_scalar_div, libarb), Nothing,
+        (Ref{narb_poly}, Ref{narb_poly}, Ref{narb}, Int),
+        z, a, b, p)
+  return z  
+end
+
+
 
 function Base.factorial(a::Int, p::Int)
   z = narb()
@@ -1023,6 +1104,7 @@ function add_error!(z::nacb, a::narb)
   end
   return z
 end
+
 
 #### special functions required for field F with elem_type T ###################
 
@@ -1365,7 +1447,7 @@ end
 function series(a::hyp_majorant{narb}, ord::Int, p::Int)
   s = zero(narb_poly)
   for j in 1:ord-1
-    c = zero(nacb)
+    c = zero(narb)
 
 #  log_coeff::S              # log(1/(1-z))
     add!(c, c, mul(a.log_coeff, fmpq(1//j), p), p)
@@ -1382,7 +1464,7 @@ function series(a::hyp_majorant{narb}, ord::Int, p::Int)
 #  recp_coeffs::Vector{S}    # [z/(1-z)^i]
     for i in 1:length(a.recp_coeffs)
       d = binomial(ZZ(i-1+j-1), ZZ(j-1))
-      add!(c, c, mul(a.poly_coeffs[i], d, p), p)      
+      add!(c, c, mul(a.recp_coeffs[i], d, p), p)      
     end
 
     if isodd(j)
@@ -1406,7 +1488,7 @@ end
 
 # evaluate it at z = z
 function eval_series(a::hyp_majorant{narb}, z::narb_poly, ord::Int, p::Int)
-  l1 = neg!(log1p_series(-z, ord, p))
+  l1 = neg!(log1p_series(neg(z), ord, p))
   l2 = log1p_series(z, ord, p)
 
 #  log_coeff::S              # log(1/(1-z))
@@ -1429,7 +1511,7 @@ function eval_series(a::hyp_majorant{narb}, z::narb_poly, ord::Int, p::Int)
   v = inv_series(sub(1, z, p), ord, p)
   t = z
   for i in 1:length(a.recp_coeffs)
-    t = mul_low(t, t, v, ord, p)
+    t = mullow(t, v, ord, p)
     add!(s, s, mul(t, a.recp_coeffs[i], p), p)
   end
 
@@ -1437,14 +1519,14 @@ function eval_series(a::hyp_majorant{narb}, z::narb_poly, ord::Int, p::Int)
   v = inv_series(sub(1, mullow(z, z, ord, p), p), ord, p)
   t = z
   for i in 1:length(a.recp2_coeffs1)
-    t = mullow(t, t, v, ord, p)
+    t = mullow(t, v, ord, p)
     add!(s, s, mul(t, a.recp2_coeffs1[i], p), p)
   end
 
 #  recp2_coeffs2::Vector{S}  # [z^2/(1-z^2)^i]
   t = mullow(z, z, ord, p)
   for i in 1:length(a.recp2_coeffs1)
-    t = mullow(t, t, v, ord, p)
+    t = mullow(t, v, ord, p)
     add!(s, s, mul(t, a.recp2_coeffs1[i], p), p)
   end
 
@@ -1469,6 +1551,11 @@ function partial_fractions(f, k1::Int, k2::Int)
   F = base_ring(Fθ)
   S = elem_type(Fθ)
   z = gen(Fθz)
+
+#println("partial_fractions called")
+#@show f
+#@show k1
+#@show k2
 
   r = hyp_majorant{S}(zero(Fθ), zero(Fθ), zero(Fθ), S[], S[], S[], S[])
 
@@ -1501,7 +1588,7 @@ function partial_fractions(f, k1::Int, k2::Int)
       a = divexact(e2+e1, k2 == 1 ? 4 : 4*k2-4);
       b = divexact(e2-e1, k2 == 1 ? 4 : 4*k2-4);
       if k2 == 1
-        f = divexact(-2*(a+b*z)+(1-z)^(1-k1)*f, 1-z^2)
+        f = divexact(-2*(a+b*z)+f, 1-z^2)
         r.log2_coeff1 += a
         r.log2_coeff0 += b
       else
@@ -1535,11 +1622,11 @@ function fraction_bound_normal(
     return zero(narb)
   end
 
-println("fraction_bound_normal called")
-@show (f, g)
-@show αs
-@show τ
-@show (n0, n1)
+#println("fraction_bound_normal called")
+#@show (f, g)
+#@show αs
+#@show τ
+#@show (n0, n1)
 
   pm_one = narb()
   ccall((:arb_zero_pm_one, libarb), Nothing,
@@ -1588,13 +1675,13 @@ println("fraction_bound_normal called")
     if α > 0 # TODO
       loc = numerator(ceil(α))  # TODO
       if loc <= n0
-        m = abs(1-α/n0)
+        m = abs(1-divexact(α,n0))
       elseif n1 >= 0 && n1 < loc
-        m = abs(1-α/n1)
+        m = abs(1-divexact(α,n1))
       else
-        m = min(abs(1-α/(loc-1)), abs(1-α/loc))
+        m = min(abs(1-divexact(α,loc-1)), abs(1-divexact(α,loc)))
       end
-      mul!(c, c, m)
+      mul!(c, c, m, p)
     end
   end
   inv!(c, c, p)
@@ -1613,7 +1700,7 @@ println("fraction_bound_normal called")
   mul!(res, res, c, p)
   add!(res, res, abs(nacb(coeff(f,d-1), p), p), p)
 
-println("fraction_bound_normal returning ", res)
+#println("fraction_bound_normal returning ", res)
 
   return res
 end
@@ -1649,9 +1736,9 @@ function equ_bound(
   N::Int,
   p::Int) where T
 
-println("equ_bound called")
-@show Pθ
-@show Px
+#println("equ_bound called")
+#@show Pθ
+#@show Px
 
   Fθ = parent(Pθ[1])
   θ = gen(Fθ)
@@ -1661,14 +1748,14 @@ println("equ_bound called")
 
   # Q0 = Q_0(θ) shifted by lambda
   Q0 = evaluate(divexact(Pθ[1+0],c), θ + λ)
-@show Q0
+#@show Q0
 
   # f = (Pθ - Px[1+r]*Q0)/(c*x) convert to bivariate with z a.k.a x on the outside
   # f is also shifted by λ
   Fθz,z = PolynomialRing(Fθ, "z")
   f = sum(evaluate(Pθ[1+i], θ + λ)*z^i for i in 0:s)
   f = divexact(f - Px[1+r](z)*Q0, c*z)
-@show f
+#@show f
 
   # also shift the roots αs of Q0
   αs = αs .- λ
@@ -1694,10 +1781,10 @@ println("equ_bound called")
     end
   end
   @assert isone(den)
-@show (k1, k2)
+#@show (k1, k2)
 
   pf = partial_fractions(f, k1, k2)
-@show pf
+#@show pf
 
   # collect the multiplicities of the ns
   nμ = Tuple{fmpz, Int}[]
@@ -1720,7 +1807,7 @@ println("equ_bound called")
     curN = fmpz(n + 1)
   end
   majorant_bound_normal(maj, pf, Q0, αs, curτ, curN, fmpz(-1), p)
-@show maj
+#@show maj
   # 1/Px[1+r] is majorized by abs(1/c)/((1-x)^max(0,k1-k2)*(1-x^2)^k2)
   return (abs(nacb(inv(c), p), p), max(0,k1-k2), k2, maj, curτ)
 end
@@ -1733,10 +1820,6 @@ function majorant_bound_normal(
   τ::Int,
   n0::fmpz, n1::fmpz,
   p::Int) where {S, T}
-
-println("majorant_bound_normal called")
-@show pf
-@show Q0
 
   for (i, j) in zip(coeffs(maj), coeffs(pf))
     max!(i, i, fraction_bound_normal(j, Q0, αs, τ, n0, n1, p), p)
@@ -1796,12 +1879,14 @@ function eval_basis(
   invz::nacb,     # 1/z only used if normal = false
   p::Int) where T
 
-println("eval_basis")
-@show Pθ
-@show Px
-@show (λ, ns)
-@show αs
-@show z
+#println("eval_basis")
+#@show Pθ
+#@show Px
+#@show (λ, ns)
+#@show αs
+#@show z
+
+  p += 20
 
   ν = length(ns)    # number of initial conditions
   τ = 0             # strict bound on the power of log(z) thus far
@@ -1846,9 +1931,9 @@ println("eval_basis")
     for i in 1:s
       # Pn[1 + i] is a polynomial in θ. Apply it to u[i] where θ is
       # the shift operator and sub result from rhs
-      for l in 0:degree(Pn[1 + i])
-        for j in 1:length(u[i])-l, k in 1:ν
-          sub!(rhs[j][k], rhs[j][k], coeff(Pn[1+i], l)*u[i][j + l][k])
+      for k in 0:degree(Pn[1 + i])
+        for j in 1:length(u[i])-k, l in 1:ν
+          sub!(rhs[j][l], rhs[j][l], coeff(Pn[1+i], k)*u[i][j + k][l])
         end
       end
     end
@@ -1917,13 +2002,13 @@ println("eval_basis")
   # exp(maj(z)) is the hhat(z)
   # finalτ is strict bound on the power of log(z) in the real solution f(z)
   (c, k1, k2, maj, finalτ) = equ_bound(Pθ, Px, λ, ns, αs, τ, N, p)
-@show c
-@show k1
-@show k2
-@show maj
+#@show c
+#@show k1
+#@show k2
+#@show maj
 
   q = q_residual(Pθ, Px, u, λ, N, τ, ν)
-@show q
+#@show q
 
   # The error bounds need more work
   finalerror = [narb_poly() for l in 1:ν]
@@ -1932,7 +2017,7 @@ println("eval_basis")
     for i in 0:s-1
       # first take the max's of coeffs of log(z)^j/j!
       m = zero(narb)
-      for j in 0:s-1
+      for j in 0:τ-1
         max!(m, m, abs(nacb((N+i)*q[1+i,1+j,l], p), p), p)
       end
       setcoeff!(f, i, m)
@@ -1960,7 +2045,8 @@ println("eval_basis")
     mul!(finalerror[l], finalerror[l], c, p)
     f = pow_series(inv_series(sub(1, zeval, p), δ, p), narb(k1), δ, p)
     finalerror[l] = mullow(finalerror[l], f, δ, p)
-    f = pow_series(inv_series(add(1, zeval, p), δ, p), narb(k2), δ, p)
+    z2eval = mullow(zeval, zeval, δ, p)
+    f = pow_series(inv_series(sub(1, z2eval, p), δ, p), narb(k2), δ, p)
     finalerror[l] = mullow(finalerror[l], f, δ, p)
 
     # g(z)
@@ -1968,7 +2054,7 @@ println("eval_basis")
     f = narb_poly(coeff(g, 0))
     for i in 1:s-1
       t = mullow(t, zeval, δ, p)
-      add!(f, f, mul(t, coeff(g, i), p))
+      add!(f, f, mul(t, coeff(g, i), p), p)
     end
     finalerror[l] = mullow(finalerror[l], f, δ, p)
 
@@ -1980,11 +2066,11 @@ println("eval_basis")
     logzeval = log_series(zeval, δ, p)
     f = one(narb_poly)
     for j in finalτ-1:-1:1
-      div!(f, mullow(f, logzeval, δ, p), narb(j, p), p)
+      div!(f, mullow(f, logzeval, δ, p), narb(j), p)
       add!(f, f, 1, p)
     end
     finalerror[l] = mullow(finalerror[l], f, δ, p)
-@show finalerror[l]
+#@show finalerror[l]
   end
 
   # evaluate the polynomials in log(z)
@@ -2004,7 +2090,10 @@ println("eval_basis")
       end
     end
     mul!(t, t, d == 0 ? zλ : mul(zλ, pow(z, -d, p), p), p)
-    add_error!(t, mul(coeff(finalerror[l], d), factorial(d, p), p))
+
+    er = mul(coeff(finalerror[l], d), factorial(d, p), p)
+#@show (radius(er), radius(t))
+    add_error!(t, er)
     setindex!(M, 1+d, l, t)
   end
   return M
@@ -2079,17 +2168,22 @@ function rising_factorial_series(a::nacb, b::Int, t::fmpz, ord::Int, p::Int)
   return z
 end
 
+function pi!(z::narb, p::Int)
+  ccall((:arb_const_pi, libarb), Nothing,
+        (Ref{narb}, Int),
+        z, p)
+  return z
+end
+
 # π*ε*csc(x*π*ε)
 function cscpi_series(x::fmpz, ord::Int, p::Int)
   z = nacb_poly()
   setcoeff!(z, 0, nacb(1//x, p))
   t = narb()
   for n in 1:div(ord-1,2)
-    ccall((:arb_const_pi, libarb), Nothing,
-          (Ref{narb}, Int),
-          t, p)
-    pow!(t, t, 2*n, p)
-    mul!(t, t, bernoulli(2*n)//factorial(ZZ(2*n))*
+    pi!(t, p)
+    pow!(t, t, UInt(2*n), p)
+    mul!(t, t, divexact(bernoulli(2*n),factorial(ZZ(2*n)))*
                (-1)^(n+1)*(4^n-2)*x^(2*n-1), p) # TODO
     setcoeff!(z, 2*n, nacb(t))
   end
@@ -2224,7 +2318,7 @@ function compute_f_at_∞(a::Vector{T}, b::Vector{T}, z::nacb, p::Int) where T
   # ∞ -> z
   Pθ, Px = hyp_equ(a, b, Fx(0)//Fx(1), -Fx(1)//x)
   αs = a
-  nz = neg!(nacb(), z)
+  nz = neg(z)
   rz = inv(nz, p)
   s = zero(nacb)
   for (λ, ns, indices) in partition_mod1(a)
@@ -2237,6 +2331,7 @@ function compute_f_at_∞(a::Vector{T}, b::Vector{T}, z::nacb, p::Int) where T
 end
 
 function compute_f_at_1(a::Vector{T}, b::Vector{T}, z::nacb, p::Int) where T
+  p += 20
   n = length(a)
   F = parent(a[1])
   Fx, x = PolynomialRing(F, "x")
@@ -2250,7 +2345,7 @@ function compute_f_at_1(a::Vector{T}, b::Vector{T}, z::nacb, p::Int) where T
   end
   # roots of indicial equation are 0:n-2 and σ
   σ::T = sum(b) - sum(a)
-  αs = push!(FF.(0:n-2), σ)
+  αs = push!(F.(0:n-2), σ)
   ok, ZZσ = isinteger_with_integer(σ)
   if n < 2
     ρ = [(σ, [ZZ(0)])]
@@ -2262,8 +2357,8 @@ function compute_f_at_1(a::Vector{T}, b::Vector{T}, z::nacb, p::Int) where T
   end
   # 1 -> w and 1 -> z
   Pθ, Px = hyp_equ(a, b, Fx(0)//Fx(1), (1-x)//Fx(1))
-  e1 = eval_bases(Pθ, Px, ρ, αs, 1-z, 1, true, nacb(), p)
-  e2 = eval_bases(Pθ, Px, ρ, αs, 1-w, n, true, nacb(), p)
+  e1 = eval_bases(Pθ, Px, ρ, αs, sub(1, z, p+60), 1, true, nacb(), p)
+  e2 = eval_bases(Pθ, Px, ρ, αs, sub(1, w, p+60), n, true, nacb(), p)
   # 0 -> w -> 1 -> z
   return mul(e1, solve(e2, e0, p), p)[1, 1]
 end
@@ -2274,11 +2369,11 @@ function compute_f_anywhere(a::Vector{T}, b::Vector{T}, z::nacb, p::Int) where T
   # 0 -> (1-sqrt(1-z))/(1+sqrt(1-z))
   Pθ, Px = hyp_equ(a, b, -2*Fx(a[1])//(1+x), 4*x//(1+x)^2)
   αs = push!(F(1) .- b, F(0))
-  t = sqrt(1-z, p)
-  s = 1+t
-  e = eval_basis(Pθ, Px, F(0), [ZZ(0)], αs, div(1-t, s, p), 1, true, nacb(), p)
+  t = sqrt(sub(1, z, p+60), p+60)
+  s = add(1, t, p+60)
+  e = eval_basis(Pθ, Px, F(0), [ZZ(0)], αs, div(sub(1, t, p+60), s, p), 1, true, nacb(), p)
   ldexp!(s, s, -1)
-  return mul(pow(s, -2*a[1], p), e[1, 1], p)
+  return mul(pow(s, -2*a[1], p), e[1,1], p)
 end
 
 # The non-regularized function is undefined if any bi is in {0, -1, -2, ...}.
@@ -2289,10 +2384,12 @@ end
 #      prod_i (ai)_n / prod_i Γ(bi + n) * z^n / n!  (with no log(z))
 function compute_pfq(a::Vector{T}, b::Vector{T}, z::nacb, p::Int) where T
   @assert length(a) == length(b) + 1
+  Nemo.arb_check_precision(p+200)
+  p += 20
   zz = convert(Complex{Float64}, z)
-  if abs2(zz) < 0.8
+  if abs2(zz) < (7/8)^2
     return compute_f_at_0(a, b, z, p)
-  elseif abs2(zz) > 1.2
+  elseif abs2(zz) > (8/7)^2
     return compute_f_at_∞(a, b, z, p)
   elseif abs2(zz) < 2*real(zz) - 0.75
     return compute_f_at_1(a, b, z, p)
@@ -2303,63 +2400,259 @@ end
 
 #### tests #####################################################################
 
+# TODO maybe use the acb type with its parent precision for testing
+function Base.:(+)(x::Int, y::nacb)
+  return add!(nacb(), y, x, precision_inc(y, 60))
+end
 
-@show compute_pfq([QQ(1//3), QQ(2//3)],
-                  [QQ(2)],
-                  nacb(QQ(1//2), 100),
-                  100)
+function Base.:(+)(y::nacb, x::Int)
+  return add!(nacb(), y, x, precision_inc(y, 60))
+end
 
-#=
-@show compute_pfq([QQ(1//3), QQ(2//3)],
-                  [QQ(2)],
-                  nacb(QQ(-21//20), 100),
-                  100)
+function Base.:(-)(x::Int, y::nacb)
+  return sub!(nacb(), x, y, precision_inc(y, 60))
+end
 
-@show compute_pfq([QQ(1//3), QQ(2//3)],
-                  [QQ(2)],
-                  nacb(QQ(21//20), 100),
-                  100)
+function Base.:-(a::T) where T <: Union{narb, nacb, narb_poly, acb_poly}
+  return neg!(T(), a)
+end
 
-@show compute_pfq([QQ(1//3), QQ(2//3)],
-                  [QQ(2)],
-                  nacb(QQ(19//20), 100),
-                  100)
+function Base.:-(x::nacb, y::Int)
+  return sub!(nacb(), x, y, precision_inc(x, 60))
+end
 
-@show compute_pfq([QQ(1//3), QQ(2//3)],
-                  [QQ(2)],
-                  nacb(QQ(-31//20), 100),
-                  100)
+function Base.:*(a::Int, b::nacb)
+  return mul!(nacb(), b, a, precision(b))
+end
 
-@show compute_pfq([QQ(1//3), QQ(2//3)],
-                  [QQ(2)],
-                  nacb(QQ(31//20), 100),
-                  100)
+function Base.:*(a::nacb, b::nacb)
+  return mul!(nacb(), a, b, precision_min(a, b))
+end
+
+function Base.:-(a::nacb, b::nacb)
+  return sub!(nacb(), a, b, precision_min(a, b))
+end
+
+function Base.:+(a::nacb, b::nacb)
+  return add!(nacb(), a, b, precision_min(a, b))
+end
+
+function Base.:/(a::nacb, b::nacb)
+  return div!(nacb(), a, b, precision_min(a, b))
+end
+
+function Base.:^(a::nacb, b::Union{Int, fmpq})
+  return pow!(nacb(), a, b, precision_inc(a, 60))
+end
 
 
-@show compute_pfq([QQ(1//3), QQ(2//3), QQ(1//2)],
-                  [QQ(2), QQ(4//5)],
-                  nacb(QQ(-21//20), 100),
-                  100)
+function Base.:*(a::narb, b::nacb)
+  return mul!(nacb(), b, a, precision_min(a,b))
+end
 
-@show compute_pfq([QQ(1//3), QQ(2//3), QQ(1//2)],
-                  [QQ(2), QQ(4//5)],
-                  nacb(QQ(21//20), 100),
-                  100)
+function Base.:/(a::Int, b::nacb)
+  p = precision(b)
+  @assert p < ARF_PREC_EXACT-10
+  z = nacb()
+  inv!(z, b, p+10)
+  mul!(z, z, a, p+10)
+  return z
+end
 
-@show compute_pfq([QQ(1//3), QQ(2//3), QQ(1//2)],
-                  [QQ(2), QQ(4//5)],
-                  nacb(QQ(19//20), 100),
-                  100)
+function Base.:/(a::nacb, b::Int)
+  p = precision(a)
+  @assert p < ARF_PREC_EXACT-10
+  return return div!(nacb(), a, b, p+10)
+end
 
-@show compute_pfq([QQ(1//3), QQ(2//3), QQ(1//2)],
-                  [QQ(2), QQ(4//5)],
-                  nacb(QQ(-31//20), 100),
-                  100)
+function nacb(a::Rational, p::Int)
+  return nacb(QQ(a), p)
+end
 
-@show compute_pfq([QQ(1//3), QQ(2//3), QQ(1//2)],
-                  [QQ(2), QQ(4//5)],
-                  nacb(QQ(31//20), 100),
-                  100)
-=#
+function pfq(a, b, z::nacb)
+  return compute_pfq(map(QQ, a), map(QQ, b), z, precision(z))
+end
+
+function Base.:^(a::nacb, b::Rational)
+  return a^QQ(b)
+end
+
+function Base.:*(a::nacb, b::Rational)
+  return mul(a, QQ(b), precision(a))
+end
+
+function Base.:*(b::Int, a::narb)
+  p = precision(a)
+  return mul!(narb(), a, b, p)
+end
+
+function Base.:*(b::Rational, a::nacb)
+  p = precision(a)
+  return mul(a, nacb(QQ(b), p), p)
+end
+
+function Base.:/(a::narb, b::narb)
+  p = precision_min(a, b)
+  return div!(narb(), a, b, p)
+end
+
+function Base.:-(a::Rational, b::nacb)
+  p = precision_inc(b, 60)
+  return sub!(nacb(), nacb(a, p), b, p)
+end
+
+function Base.:+(a::Rational, b::nacb)
+  p = precision_inc(b, 60)
+  @assert p < ARF_PREC_EXACT
+  return add!(nacb(), nacb(a, p), b, p)
+end
+
+function θ3(a::nacb, b::nacb)
+  z = [nacb(), nacb(), nacb(), nacb()]
+  p = precision_min(a, b)
+  ccall((:acb_modular_theta, libarb), Nothing,
+        (Ref{nacb}, Ref{nacb}, Ref{nacb}, Ref{nacb}, Ref{nacb}, Ref{nacb}, Int),
+        z[1], z[2], z[3], z[4], a, b, p)
+  return z[3]
+end
+
+function wp(a::nacb, b::nacb)
+  z = nacb()
+  p = precision_min(a, b)
+  ccall((:acb_elliptic_p, libarb), Nothing,
+        (Ref{nacb}, Ref{nacb}, Ref{nacb}, Int),
+        z, a, b, p)
+  return z
+end
+
+function gamma(a::Rational, p::Int)
+  z = narb()
+  ccall((:arb_gamma_fmpq, libarb), Nothing,
+        (Ref{narb}, Ref{fmpq}, Int),
+        z, QQ(a), p)
+  return z
+end
+
+function Base.exp(a::nacb)
+  z = nacb()
+  p = precision_inc(a, 60)
+  ccall((:acb_exp, libarb), Nothing,
+        (Ref{nacb}, Ref{nacb}, Int),
+        z, a, p)
+  return z
+end
+
+
+println("************************** tests *****************************")
+
+@testset "algebraic cases" begin
+  for j in [nacb(1//7+2000, 100), nacb(1//7-2000, 100),
+            nacb(1//7+1728, 100), nacb(1//7-1728, 100),
+            nacb(1//7+200, 100), nacb(1//7-200, 100),
+            nacb(1//7+64, 100), nacb(1//7-64, 100),
+            nacb(1//7+2, 100), nacb(1//7-2, 100)]
+    f1 = pfq([-1//12,1//4],[2//3],1728/j)
+    f2 = pfq([1//4, 7//12],[4//3],1728/j)
+    t = j^(1//3)/3*f1/f2
+    @test overlaps(j, 27*(t^4+8*t)^3/(t^3-1)^3)
+
+    f1 = pfq([-1//24,7//24],[3//4],1728/j)
+    f2 = pfq([5//24,13//24],[5//4],1728/j)
+    t = j^(1//4)/2*f1/f2
+    @test overlaps(j, 16*(t^8+14*t^4+1)^3/(t^5-t)^4)
+
+    f1 = pfq([-1//60,19//60],[4//5],1728/j)
+    f2 = pfq([11//60,31//60],[6//5],1728/j)
+    t = j^(1//5)*f1/f2
+    @test overlaps(j, (t^20+228*t^15+494*t^10-228*t^5+1)^3/(t^11-11*t^6-t)^5)
+
+    f1 = pfq([-1//42,13//42,9//14],[4//7,6//7],1728/j)
+    f2 = pfq([5//42,19//42,11//14],[5//7,8//7],1728/j)
+    f3 = pfq([17//42,31//42,15//14],[9//7,10//7],1728/j)
+    t = j*f1*f2^2/f3^3
+    @test overlaps(j, (t^2-t+1)^3*(t^6+229*t^5+270*t^4-1695*t^3+1430*t^2-
+                                      235*t+1)^3/((t^2-t)*(t^3-8*t^2+5*t+1)^7))
+
+    f1 = pfq([-1//10,1//10,1//2],[1//5,4//5],-64/j)
+    f2 = pfq([1//10,3//10,7//10],[2//5,6//5],-64/j)
+    f3 = pfq([7//10,9//10,13//10],[8//5,9//5],-64/j)
+    t = j*f2^2/f3*(j*f1^2 + f2*f3)/(j*f2^3 + f1*f3^2)
+    @test overlaps(j, (t^2-1)*(t^2-4*t-1)^5/(t*(t^2+t-1)^5))
+  end
+end
+
+@testset "function zeros" begin
+  p = 100
+  i = nacb(zero(narb), one(narb))
+  ipi = nacb(zero(narb), pi!(narb(), p))
+
+  for m in [nacb(2//3, p)]
+    f1 = pfq([1//3,2//3],[1],m)
+    f2 = pfq([1//3,2//3],[1],1-m)
+    f3 = pfq([5//6,6//6,7//6],[3//2,3//2],1-m)
+    τ = (nacb(-1//3, p))^(1//2)*f2/f1
+    z = (-2 + 3*τ)/4 - (1-m)^(1//2)*f3/(6*ipi*f1)
+    @test overlaps(-θ3(z,2*τ)*θ3(z,6*τ), exp(2*ipi*τ)*θ3(z+τ,2*τ)*θ3(z-3*τ,6*τ))
+  end
+
+  for j in [nacb(10000//3, p), nacb(10//3, p)]
+    f1 = pfq([1//12,5//12],[1],1728/j)
+    f2 = pfq([1//12,5//12],[1//2],1-1728/j)
+    f3 = pfq([1//3,2//3,1],[3//4,5//4],1-1728/j)
+    τ = i*(2*gamma(1//2,p)/gamma(7//12,p)/gamma(11//12,p)*f2/f1 - 1)
+    z = (1 + τ)/2 + (nacb(2//3,p))^(1//2)/ipi*(1-1728/j)^(1//4)*f3/f1
+    @test overlaps(zero(nacb), wp(z, τ))
+  end
+end
+
+
+println("************************** benchmarks *****************************")
+
+function run_bench(a, b, z, p, fx = "", fy = "")
+
+  A = map(QQ, a)
+  B = map(QQ, b)
+  println(" --------  $A  $B  $z  $p digits  -----------")
+
+  p = trunc(Int, p*3.322)                     
+  zz = nacb(narb(QQ(real(z)), p), narb(QQ(imag(z)), p))
+  @time f = compute_pfq(A, B, zz, p)
+  @assert isempty(fx) || overlaps(set!(narb(), fx, p), real(f))
+  @assert isempty(fy) || overlaps(set!(narb(), fy, p), imag(f))
+
+  bits_lost = p - precision(f)
+@show bits_lost
+  return bits_lost
+end
+
+function run_benchmarks()
+  t1 = time()
+  bits_lost = 0
+  bits_lost += run_bench([1//2,1//3,1//5,1//4],[8//7,1//6,1//9], 1//10, 20, "[1.04165510107809208771 +/- 2.43e-21]", "[+/- 2.07e-24]")
+
+  bits_lost += run_bench([1//2,1//3,1//5,1//4],[8//7,1//6,1//9],-1+im//300, 200, "[0.7361464107568699653654181932021195729016525520251669994612965514688945567873978145804140256340981534032171785111170341312718204804372620880207341602115123749944939921894542469460886808720225689828743232125 +/- 7.05e-206]", "[0.0006091142434506593619507708486086804762150980760156332916347162351588534898343587334997033663903136796976875663495423707271793534625090625898822976732269967397826684043934917897380440587935220808422516 +/- 1.57e-203]")
+  bits_lost += run_bench([1//2,1//3,1//5,1//4],[8//7,1//6,1//9],1//300+im, 200, "[0.853498211060579954490363364784481268197877903709746131856530610099120791429240016786586006359060701719614321941609976993732551828969874878632105881859561180925930687147324142274043333887472085663429960 +/- 4.43e-202]", "[0.302235718305177081880438308463901805943967344220865402810895162185350037204941683860825775142412188198314838346748247659487319633322537866130218549109342613855275799727201394499484865564020106350734127 +/- 2.99e-202]")
+
+  bits_lost += run_bench([1//2,1//3,1//5,1//4],[8//7,1//6,1//9], 11//10, 100, "[2.09473837006811761028534487482955095697725399923738208299473100086979606619943028860894705913795820 +/- 2.23e-99]", "[-1.32063424488884879145689203640820495365830310353133670921975318942279074195339938129952186569083161 +/- 3.11e-99]")
+  bits_lost += run_bench([1//2,1//3,1//5,1//4],[8//7,1//6,409//420], 11//10, 100, "[1.10012992690145570229907705218466524693847390580609878681247630305435529779555060922581931979395195 +/- 7.02e-100]", "[-0.019650631936840220248345681395791981619880186753148199866219643526635725512689324474868785073820769 +/- 1.99e-100]")
+
+  bits_lost += run_bench([1//2,1//3,1//5,1//4],[8//7,1//6,1//9], 21//10+im, 100, "[0.71474921490254889156840981949000811062050067188575315042564339656971171954121748902674586037861411 +/- 4.77e-99]", "[0.9781249447537276082866697472831284801654120848168295066054521588403569889034210483850430568298298 +/- 3.56e-98]")
+  bits_lost += run_bench([1//2,1//3,1//5,1//4],[8//7,1//6,10//9], 21//10, 100, "[1.09611960714180653165793929034538750471702782740589204327790995048489804128469673421588286818944088 +/- 2.55e-99]", "[-0.1103381390329406104849629727151339938760273060221215999605687131539917991045753083253694103910355 +/- 4.15e-98]")
+  bits_lost += run_bench([1//2,1//3,3//2,3//2],[8//7,1//6,409//420], 21//10*im, 100, "[-0.3836936156357715109532470008774342030087022878339141902193492463878637848072764973662114392423830 +/- 3.82e-98]", "[0.3510560688879407205546122233658260321782263643876690384980560383966660407148203677984173909952239 +/- 4.45e-98]")
+  bits_lost += run_bench([1//2,1//3,3//2,3//2],[8//7,1//6,7//2+1//4], 21//10*im, 100, "[0.498286277362499154454672287676933977606853722206194319858084629633516142945046940166960257970613 +/- 3.22e-97]", "[0.5388483851104630403622090287525048639997504587807914458817597010957463072020568473516818023683285 +/- 4.40e-98]")
+  bits_lost += run_bench([1//2,1//3,3//2,3//2],[8//7,1//6,409//420], 21//10, 100, "[-0.3778888881782393774553127309816076760288807629794011361623259687233181125952890271460921393790923 +/- 1.00e-98]", "[1.0324057197731830866862412722661912510450592489443071095814531303361891341977524868140295288542887 +/- 3.18e-98]")
+  bits_lost += run_bench([1//2,1//3,3//2,3//2],[8//7,1//6,7//2+1//4], 21//10, 100, "[0.5587476752887922757498928650974538228321146670224016380361419696854589138256157940556936141300072 +/- 7.32e-98]", "[-2.649787031624682836178763161718415233309248545654569640464561282640046441505973680884328801960931 +/- 1.55e-97]")
+  bits_lost += run_bench([1//2,1//3,3//2,5//2],[8//7,1//6,7//2+1//4], 21//10, 100, "[-1.799478585201052861552266948753576293798081804909492183540383822249557260558139389282027739306081 +/- 2.29e-97]", "[-2.0550213095299542518482540717224091776461005489751204129826789474740506081260337268088507033546378 +/- 5.82e-98]")
+  bits_lost += run_bench([1//2,1//3,1//3,3//2,3//2],[8//7,1//6,7//2+1//5,1//4], 21//10, 100, "[-0.116857050064488324880005256242593338635544257506370503116752352065017363357264920954229325317036 +/- 5.51e-97]", "[-3.515406819990606948896449062181976165047281121147375761111710596644569438443262697365115597303044 +/- 2.31e-97]")
+  bits_lost += run_bench([1//2,1//3,1//3,3//2,3//2,4//3],[8//7,1//6,7//2,1//4,1//5], 21//10, 100, "[-19.9404485154538633201163293612929060982693170333095030435564215171671004250390889987049810825485 +/- 2.54e-95]", "[17.0022670479727611109224091973883810218739134352957349354752346919984236719406436188027263944349 +/- 4.04e-95]")
+  bits_lost += run_bench([1,1,2,2,3],[3//2,3//2,3//2,3//2], 21//10, 100, "[-0.51585621412817788953636435138740344792545648221588737349075642969025142618998460938638704600278106 +/- 3.91e-99]", "[-0.05470891931824783630344691907005460888039986744824234445189809615982014632842245019368879129590597 +/- 3.12e-99]")
+
+  bits_lost += run_bench([-2,1,2,2,3],[4//3,4//3,4//3,4//3], 21//10, 100, "[25.724630102040816326530612244897959183673469387755102040816326530612244897959183673469387755102041 +/- 2.05e-97]")
+
+  println("total: ", time()-t1)
+  println("bits lost: ", bits_lost)
+end
+
+run_benchmarks()
 
 nothing
